@@ -1,0 +1,463 @@
+--- a/drivers/net/ethernet/aquantia/atlantic/aq_dash.c
++++ b/drivers/net/ethernet/aquantia/atlantic/aq_dash.c
+@@ -0,0 +1,317 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * aq_dash.c: DASH generic netlink relay for AQC107 DASH firmware (4.2.x).
++ *
++ * Ported from the Marvell (Aquantia) AQtion out-of-tree driver 2.5.5 (GPL v2)
++ * to the upstream atlantic driver (Linux 7.0). Userspace AqDashConfig and
++ * AqDashAgent send raw FW RPC payloads through the "aq-dash" family; the
++ * driver relays them to the firmware mailbox and forwards FW requests to the
++ * agent through the "aq_dash_event" multicast group.
++ */
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/netdevice.h>
++#include <net/netlink.h>
++#include <net/genetlink.h>
++
++#include "aq_dash.h"
++#include "aq_nic.h"
++#include "aq_hw.h"
++#include "aq_main.h"
++#include "aq_cfg.h"
++#include "hw_atl/hw_atl_utils.h"
++
++#define AQ_DASH_GENL_NAME "aq-dash"
++
++enum aq_dash_rpc_msg_id {
++	AQ_DASH_SET_CONFIG = 0x30,
++	AQ_DASH_READ_REQUEST = 0x31,
++	AQ_DASH_POWER_OP_ACK = 0x35,
++};
++
++struct __packed aq_dash_rpc_hdr {
++	u32 id;
++	u32 size;
++};
++
++struct __packed aq_dash_event {
++	u32 size;
++	u8 data[508];
++};
++
++struct __packed aq_dash_request {
++	u32 msg_id;
++	u32 size;
++	u16 power_state;
++	u16 reserved;
++};
++
++static const struct nla_policy aq_dash_nl_policy[AQ_DASH_ATTR_MAX + 1] = {
++	[AQ_DASH_ATTR_CMD_ID]		= { .type = NLA_S32 },
++	[AQ_DASH_ATTR_MSG_DATA_LEN]	= { .type = NLA_S32 },
++	[AQ_DASH_ATTR_IFNAME]		= { .type = NLA_NUL_STRING },
++	[AQ_DASH_ATTR_MSG_DATA]		= { .type = NLA_NUL_STRING },
++};
++
++static const struct genl_multicast_group aq_dash_groups[] = {
++	[AQ_DASH_EVENT_GROUP] = { .name = "aq_dash_event", },
++};
++
++static struct genl_family aq_dash_nl_family;
++
++static bool aq_dash_is_atl_device(const struct net_device *dev)
++{
++	return dev && dev->dev.parent &&
++	       !strcmp(dev_driver_string(dev->dev.parent), AQ_CFG_DRV_NAME);
++}
++
++static bool aq_dash_is_4x_fw(struct aq_nic_s *self)
++{
++	return (self->aq_hw_ops->hw_get_fw_version(self->aq_hw) >> 24) == 4;
++}
++
++/* caller holds fwreq_mutex; on success *resp_ptr is kmalloc'ed */
++static int aq_dash_get_data(struct aq_hw_s *self, const u8 *cfg, u16 *size,
++			    u8 **resp_ptr)
++{
++	struct hw_atl_utils_fw_rpc *prpc = NULL;
++	struct aq_dash_rpc_hdr hdr;
++	u32 word_count;
++	u32 *buf;
++	int ret;
++
++	ret = hw_atl_utils_fw_rpc_wait(self, &prpc);
++	if (ret < 0)
++		return ret;
++
++	memcpy(&self->rpc, cfg, *size);
++	ret = hw_atl_utils_fw_rpc_call(self, *size);
++	if (ret < 0)
++		return ret;
++
++	ret = hw_atl_utils_fw_rpc_wait(self, &prpc);
++	if (ret < 0)
++		return ret;
++
++	ret = hw_atl_utils_fw_downld_dwords(self, self->rpc_addr, (u32 *)&hdr,
++					    sizeof(hdr) / sizeof(u32));
++	if (ret < 0)
++		return ret;
++
++	if (hdr.size == 0 || hdr.size > sizeof(self->rpc))
++		return -EINVAL;
++
++	word_count = DIV_ROUND_UP(hdr.size, sizeof(u32));
++	buf = kcalloc(word_count, sizeof(u32), GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	ret = hw_atl_utils_fw_downld_dwords(self, self->rpc_addr, buf,
++					    word_count);
++	if (ret < 0) {
++		kfree(buf);
++		return ret;
++	}
++
++	*size = hdr.size;
++	*resp_ptr = (u8 *)buf;
++	return 0;
++}
++
++static int aq_dash_send_data(struct aq_hw_s *self, const u8 *cfg, u16 size)
++{
++	struct hw_atl_utils_fw_rpc *prpc = NULL;
++	int ret;
++
++	ret = hw_atl_utils_fw_rpc_wait(self, &prpc);
++	if (ret < 0)
++		return ret;
++
++	memcpy(&self->rpc, cfg, size);
++	return hw_atl_utils_fw_rpc_call(self, size);
++}
++
++static int aq_dash_reply(struct genl_info *info, const u8 *data, u16 size)
++{
++	struct sk_buff *msg;
++	void *hdr;
++
++	msg = genlmsg_new(nla_total_size(size), GFP_KERNEL);
++	if (!msg)
++		return -ENOBUFS;
++
++	hdr = genlmsg_put_reply(msg, info, &aq_dash_nl_family, NLMSG_DONE,
++				info->genlhdr->cmd);
++	if (!hdr || nla_put(msg, AQ_DASH_ATTR_MSG_DATA, size, data)) {
++		nlmsg_free(msg);
++		return -EMSGSIZE;
++	}
++
++	genlmsg_end(msg, hdr);
++	return genlmsg_reply(msg, info);
++}
++
++static int aq_dash_indicate_agent(const u8 *buf, u32 len)
++{
++	struct sk_buff *msg;
++	void *hdr;
++
++	if (!genl_has_listeners(&aq_dash_nl_family, &init_net,
++				AQ_DASH_EVENT_GROUP))
++		return 0;
++
++	msg = genlmsg_new(nla_total_size(len), GFP_KERNEL);
++	if (!msg)
++		return -ENOMEM;
++
++	hdr = genlmsg_put(msg, 0, 0, &aq_dash_nl_family, NLMSG_DONE,
++			  AQ_DASH_EVENT);
++	if (!hdr || nla_put(msg, AQ_DASH_ATTR_MSG_DATA, len, buf)) {
++		nlmsg_free(msg);
++		return -ENOMEM;
++	}
++
++	genlmsg_end(msg, hdr);
++	genlmsg_multicast(&aq_dash_nl_family, msg, 0, AQ_DASH_EVENT_GROUP,
++			  GFP_KERNEL);
++	return 0;
++}
++
++/* Called from the NIC service task (1 Hz) */
++void aq_dash_process_events(struct aq_nic_s *self)
++{
++	struct aq_dash_request req = {
++		.msg_id = AQ_DASH_READ_REQUEST,
++		.size = sizeof(req),
++	};
++	struct aq_dash_event ev;
++	u16 len = sizeof(req);
++	u8 *resp = NULL;
++	int ret;
++
++	if (!ATL_HW_IS_CHIP_FEATURE(self->aq_hw, ATLANTIC) ||
++	    !aq_dash_is_4x_fw(self))
++		return;
++
++	mutex_lock(&self->fwreq_mutex);
++	ret = aq_dash_get_data(self->aq_hw, (u8 *)&req, &len, &resp);
++	mutex_unlock(&self->fwreq_mutex);
++
++	if (ret < 0) {
++		netdev_dbg(self->ndev, "DASH: couldn't read FW request (%d)\n",
++			   ret);
++		goto out;
++	}
++
++	if (((struct aq_dash_request *)resp)->msg_id != AQ_DASH_READ_REQUEST ||
++	    len > sizeof(ev.data))
++		goto out;
++
++	ev.size = len;
++	memcpy(ev.data, resp, len);
++	ret = aq_dash_indicate_agent((u8 *)&ev, offsetof(struct aq_dash_event,
++							 data) + len);
++	if (ret)
++		netdev_dbg(self->ndev, "DASH: event to agent failed (%d)\n",
++			   ret);
++out:
++	kfree(resp);
++}
++
++static int aq_dash_doit_fwreq(struct sk_buff *skb, struct genl_info *info)
++{
++	struct net_device *ndev;
++	struct aq_nic_s *nic;
++	u8 *resp = NULL;
++	const u8 *cfg;
++	u32 msg_id;
++	s32 size;
++	int ret;
++
++	if (!info->attrs[AQ_DASH_ATTR_IFNAME] ||
++	    !info->attrs[AQ_DASH_ATTR_CMD_ID] ||
++	    !info->attrs[AQ_DASH_ATTR_MSG_DATA] ||
++	    !info->attrs[AQ_DASH_ATTR_MSG_DATA_LEN])
++		return -EINVAL;
++
++	ndev = dev_get_by_name(genl_info_net(info),
++			       nla_data(info->attrs[AQ_DASH_ATTR_IFNAME]));
++	if (!ndev)
++		return -ENODEV;
++
++	if (!aq_dash_is_atl_device(ndev)) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++
++	nic = netdev_priv(ndev);
++	msg_id = nla_get_u32(info->attrs[AQ_DASH_ATTR_CMD_ID]);
++	size = nla_get_s32(info->attrs[AQ_DASH_ATTR_MSG_DATA_LEN]);
++	cfg = nla_data(info->attrs[AQ_DASH_ATTR_MSG_DATA]);
++
++	if (size <= 0 || size > nla_len(info->attrs[AQ_DASH_ATTR_MSG_DATA]) ||
++	    size > sizeof(nic->aq_hw->rpc) || size > U16_MAX) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	mutex_lock(&nic->fwreq_mutex);
++	switch (msg_id) {
++	case AQ_DASH_SEND_DATA:
++		ret = aq_dash_send_data(nic->aq_hw, cfg, size);
++		break;
++	case AQ_DASH_GET_DATA: {
++		u16 len = size;
++
++		ret = aq_dash_get_data(nic->aq_hw, cfg, &len, &resp);
++		size = len;
++		break;
++	}
++	default:
++		ret = -EINVAL;
++	}
++	mutex_unlock(&nic->fwreq_mutex);
++
++	if (ret < 0)
++		netdev_err(ndev, "DASH: FW request %u failed (%d)\n", msg_id,
++			   ret);
++	else if (resp)
++		ret = aq_dash_reply(info, resp, size);
++out:
++	kfree(resp);
++	dev_put(ndev);
++	return ret;
++}
++
++static const struct genl_ops aq_dash_nl_ops[] = {
++	{
++		.cmd = AQ_DASH_CMD_FWREQ,
++		.doit = aq_dash_doit_fwreq,
++		.flags = GENL_ADMIN_PERM,
++	},
++};
++
++static struct genl_family aq_dash_nl_family = {
++	.module = THIS_MODULE,
++	.name = AQ_DASH_GENL_NAME,
++	.version = 1,
++	/* legacy (non-strict) validation, as expected by AqDashConfig */
++	.resv_start_op = AQ_DASH_CMD_MAX,
++	.maxattr = AQ_DASH_ATTR_MAX,
++	.policy = aq_dash_nl_policy,
++	.netnsok = false,
++	.ops = aq_dash_nl_ops,
++	.n_ops = ARRAY_SIZE(aq_dash_nl_ops),
++	.mcgrps = aq_dash_groups,
++	.n_mcgrps = ARRAY_SIZE(aq_dash_groups),
++};
++
++int aq_dash_nl_init(void)
++{
++	return genl_register_family(&aq_dash_nl_family);
++}
++
++void aq_dash_nl_exit(void)
++{
++	genl_unregister_family(&aq_dash_nl_family);
++}
+--- a/drivers/net/ethernet/aquantia/atlantic/aq_dash.h
++++ b/drivers/net/ethernet/aquantia/atlantic/aq_dash.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * aq_dash.h: "aq-dash" generic netlink ABI used by Marvell AqDashConfig /
++ * AqDashAgent. Attribute, command and message ids must match the userspace
++ * tools. Derived from the Marvell (Aquantia) AQtion driver 2.5.5 (GPL v2).
++ */
++#ifndef AQ_DASH_H
++#define AQ_DASH_H
++
++/* attributes */
++enum aq_dash_msg_attrs {
++	AQ_DASH_ATTR_UNSPEC,
++	AQ_DASH_ATTR_IFNAME,
++	AQ_DASH_ATTR_CMD_ID,
++	AQ_DASH_ATTR_MSG_DATA,
++	AQ_DASH_ATTR_MSG_DATA_LEN,
++	AQ_DASH_ATTR_EVENT,
++	AQ_DASH_ATTR_MAX,
++};
++
++/* commands */
++enum aq_dash_nl_command {
++	AQ_DASH_CMD_UNSPEC,
++	/* Set/Get DASH config command
++	 * Manadatory attributes:
++		AQ_DASH_ATTR_IFNAME,
++		AQ_DASH_ATTR_CMD_ID,
++		AQ_DASH_ATTR_MSG_DATA and
++		AQ_DASH_ATTR_MSG_DATA_LEN */
++	AQ_DASH_CMD_FWREQ,
++
++	/* FW upgrade/Power management event */
++	AQ_DASH_EVENT,
++
++	AQ_DASH_CMD_MAX,
++};
++
++/* dash message ids */
++enum aq_dash_msg_id {
++	AQ_DASH_SEND_DATA, /* Sends DATA to FW */
++	AQ_DASH_GET_DATA, /* Gets DATA from FW */
++};
++
++/* multicast group */
++enum genl_test_multicast_groups {
++	AQ_DASH_EVENT_GROUP,
++};
++
++struct aq_nic_s;
++int aq_dash_nl_init(void);
++void aq_dash_nl_exit(void);
++void aq_dash_process_events(struct aq_nic_s *self);
++
++#endif
+--- a/drivers/net/ethernet/aquantia/atlantic/aq_main.c
++++ b/drivers/net/ethernet/aquantia/atlantic/aq_main.c
+@@ -8,6 +8,7 @@
+ /* File aq_main.c: Main file for aQuantia Linux driver. */
+ 
+ #include "aq_main.h"
++#include "aq_dash.h"
+ #include "aq_nic.h"
+ #include "aq_pci_func.h"
+ #include "aq_ethtool.h"
+@@ -482,8 +483,15 @@
+ 		return -ENOMEM;
+ 	}
+ 
++	ret = aq_dash_nl_init();
++	if (ret) {
++		destroy_workqueue(aq_ndev_wq);
++		return ret;
++	}
++
+ 	ret = aq_pci_func_register_driver();
+ 	if (ret) {
++		aq_dash_nl_exit();
+ 		destroy_workqueue(aq_ndev_wq);
+ 		return ret;
+ 	}
+@@ -494,6 +502,7 @@
+ static void __exit aq_ndev_exit_module(void)
+ {
+ 	aq_pci_func_unregister_driver();
++	aq_dash_nl_exit();
+ 
+ 	if (aq_ndev_wq) {
+ 		destroy_workqueue(aq_ndev_wq);
+--- a/drivers/net/ethernet/aquantia/atlantic/aq_nic.c
++++ b/drivers/net/ethernet/aquantia/atlantic/aq_nic.c
+@@ -8,6 +8,7 @@
+ /* File aq_nic.c: Definition of common code for NIC. */
+ 
+ #include "aq_nic.h"
++#include "aq_dash.h"
+ #include "aq_ring.h"
+ #include "aq_vec.h"
+ #include "aq_hw.h"
+@@ -250,6 +251,9 @@
+ 	mutex_unlock(&self->fwreq_mutex);
+ 
+ 	aq_nic_update_ndev_stats(self);
++
++	/* DASH requests from FW 4.x (AqDashAgent) */
++	aq_dash_process_events(self);
+ }
+ 
+ static void aq_nic_service_timer_cb(struct timer_list *t)
+--- a/drivers/net/ethernet/aquantia/atlantic/hw_atl/hw_atl_utils.h
++++ b/drivers/net/ethernet/aquantia/atlantic/hw_atl/hw_atl_utils.h
+@@ -228,6 +228,10 @@
+ 	struct offload_rr_info rrs;
+ };
+ 
++struct __packed fw_dash_req {
++	u8 buffer[4096];
++};
++
+ struct __packed hw_atl_utils_fw_rpc {
+ 	u32 msg_id;
+ 
+@@ -238,6 +242,8 @@
+ 		struct drv_msg_enable_wakeup msg_enable_wakeup;
+ 		/* fw2x structures */
+ 		struct offload_info fw2x_offloads;
++		/* DASH FW request */
++		struct fw_dash_req dash_req;
+ 	};
+ };
+ 
+--- a/drivers/net/ethernet/aquantia/atlantic/Makefile
++++ b/drivers/net/ethernet/aquantia/atlantic/Makefile
+@@ -11,6 +11,7 @@
+ ccflags-y += -I$(src)
+ 
+ atlantic-objs := aq_main.o \
++	aq_dash.o \
+ 	aq_nic.o \
+ 	aq_pci_func.o \
+ 	aq_vec.o \

@@ -1,0 +1,24 @@
+#!/bin/sh
+# initramfs-tools hook: make the initramfs carry the aq-dash atlantic module.
+#
+# initramfs-tools copies drivers/net/* by directory, so the stock atlantic.ko ends up in the
+# initramfs and udev loads it before the root filesystem (and the DKMS/extra module) is available.
+# This hook replaces it with the module that depmod resolves (updates/dkms or extra).
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+SRC=$(modinfo -k "${version}" -F filename atlantic 2>/dev/null) || exit 0
+case "$SRC" in */kernel/drivers/*|"") exit 0 ;; esac
+
+for f in $(find "${DESTDIR}/lib/modules/${version}/kernel/drivers/net/ethernet/aquantia" -name 'atlantic.ko*' 2>/dev/null); do
+	rm -f "$f"
+	case "$SRC" in
+	*.zst) zstd -qdc "$SRC" > "${f%.ko*}.ko" ;;
+	*.xz)  xz -dc "$SRC" > "${f%.ko*}.ko" ;;
+	*.gz)  gzip -dc "$SRC" > "${f%.ko*}.ko" ;;
+	*)     cp "$SRC" "${f%.ko*}.ko" ;;
+	esac
+done
+exit 0

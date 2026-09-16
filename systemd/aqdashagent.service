@@ -1,0 +1,15 @@
+[Unit]
+Description=Marvell AQC107 DASH management agent
+Documentation=https://github.com/alanoo81/p620-amd-dash-linux
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/run
+ExecStart=/usr/local/bin/AqDashAgent
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

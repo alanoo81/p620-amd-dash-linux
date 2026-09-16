@@ -1,0 +1,12 @@
+*.ko
+*.o
+*.mod
+*.mod.c
+.*.cmd
+modules.order
+Module.symvers
+*.pem
+*.crt
+*.key
+dash-certs/
+*.zip
