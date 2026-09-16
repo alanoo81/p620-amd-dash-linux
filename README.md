@@ -23,7 +23,7 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 Working end to end, including **remote power-on from S5**:
 
 - WS-Man over HTTP (623) and HTTPS (664) with Digest authentication
-- Power management (on, off soft, power cycle, reset)
+- Power management: power-on from S5 validated; off (soft), power cycle and reset are accepted by the firmware but not exercised
 - Inventory: BIOS, NIC/EC firmware, CPU, memory, chassis, BIOS event log, boot sources
 - Text console redirection (SSH/Telnet) and VNC KVM access points are exposed (disabled by default, not tested yet)
 
@@ -77,7 +77,7 @@ tools/dashws.py -H 192.168.1.51 -u admin -p 'S3cret!' power 2      # power on
   answers (it has no IP). Exclusive mode gives the firmware its own IP/MAC and works with the OS down.
 - The Marvell `atlantic` driver 2.5.5 (the one with DASH support) does not build on 7.0; porting only
   the DASH part to the upstream driver is ~300 lines — but the firmware RPC buffer must be enlarged
-  (4096 bytes), otherwise the relay overflows it.
+  (4096 bytes): the upstream buffer is too small for DASH messages.
 - On Linux, `AqDashConfig` reads the ACPI `ASF!` table and programs the 4 SMBus power-control
   commands. A Windows VM with the NIC passed through does **not** see that table.
 - Test DASH **from another machine**: traffic from the host to its own NIC never reaches the wire.
