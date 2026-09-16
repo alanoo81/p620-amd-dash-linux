@@ -13,15 +13,16 @@ Legend: ✅ tested on the reference machine · ⚠️ exposed by the firmware, n
 | Check that DASH answers | ✅ | `identify` |
 | Power state | ✅ | `enum CIM_AssociatedPowerManagementService` → `PowerState` 2 = on, 8 = off |
 | **Power on** (from S5) | ✅ | `power 2` |
-| Power off (soft) / power cycle / reset | ⚠️ accepted states, not exercised | `power 8` / `power 5` / `power 10` |
+| Power off (soft) / reset | ❌ **rejected by the firmware** (`ReturnValue 4`) while the system is on, although listed in `AvailableRequestedPowerStates` | `power 8` / `power 10` |
+| Power cycle | ⚠️ not tested (most likely rejected like 8 and 10) | `power 5` |
 | Hardware inventory | ✅ | `enum CIM_ComputerSystem`, `CIM_Processor`, `CIM_PhysicalMemory`, `CIM_Chassis` |
 | Firmware versions | ✅ | `enum CIM_BIOSElement`, `CIM_SoftwareIdentity` (NIC firmware, EC) |
 | Sensors | ⚠️ listed (voltages, temperatures) but every reading is 0 / Unknown on the test machine | `enum CIM_NumericSensor` |
 | BIOS event log | ✅ | `enum CIM_RecordLog`, `CIM_LogEntry` |
 | Boot sources / boot order | ✅ read | `enum CIM_BootSourceSetting`, `CIM_BootConfigSetting` |
 | One-time boot / boot to BIOS setup | ⚠️ | Boot Control profile (DSP1012, one-time boot only); use DASH CLI or AMC |
-| Text console (BIOS setup over SSH/Telnet) | ⚠️ disabled by default | `CIM_TextRedirectionService` + SSH (22) / Telnet (23) endpoints on the DASH IP |
-| KVM (VNC) | ⚠️ disabled by default | `CIM_KVMRedirectionSAP`, `KVMProtocol = 4` |
+| Text console (BIOS setup over SSH/Telnet) | ⚠️ service and access points can be enabled (`RequestStateChange` → 0); ports 22/23 answer a SYN but no session opens while the OS runs; not tested during POST | `CIM_TextRedirectionService`, `CIM_TextRedirectionSAP`, SSH (22) / Telnet (23) on the DASH IP |
+| KVM (VNC) | ❌ access point listed, but `CIM_KVMRedirectionService` settings are empty and AMC requires the AMD-specific `AIMT_KVMCapabilities`, which this firmware does not implement | `CIM_KVMRedirectionSAP` |
 | DASH accounts | ✅ read | `enum CIM_Account` (lockout after 10 failed logins) |
 | Firmware update over DASH | ⚠️ | Software Update profile, NIC firmware only (AMC / DASH CLI + `AqDashAgent`) |
 | Serial-over-LAN / IPMI | ❌ | not IPMI: DASH is WS-Management only |
@@ -39,9 +40,8 @@ tools/dashws.py --https --cacert DASHCA.crt enum CIM_SoftwareIdentity
 
 ## Recommended practices
 
-- **Shut down from the OS** when it is reachable (`ssh host poweroff`), and keep DASH for
-  power-on and for when the OS is unreachable. `power 8` goes through the platform power controls
-  (ASF commands to the EC) and may not be a clean OS shutdown.
+- **Shut down and reboot from the OS** (`ssh host poweroff` / `reboot`): on this firmware DASH
+  rejects off/reset requests while the system is on. Use DASH to **power the machine on**.
 - **Wake-on-LAN stays a fallback** (`wakeonlan <host MAC>`), independent of the DASH configuration.
 - Check `AvailableRequestedPowerStates` before scripting a transition: the firmware only accepts
   states valid from the current one (e.g. `5, 8, 10` when on).
@@ -78,11 +78,32 @@ dashcli -h 192.168.1.51 -p 623 -a digest -u admin -P 'S3cret!' discover
 For HTTPS without `-C` (ignore certificate), import `DASHCA.crt` into the console's trust store.
 The TLS legacy-renegotiation requirement may affect Linux builds linked against OpenSSL 3.
 
-### AMD Management Console (AMC) — ⚠️ not tested here
+### AMD Management Console (AMC) — tested (v14), needs `tools/dash-auth-proxy.py`
 
-Windows GUI from the same AMD page: discovery, inventory, health, power, boot to BIOS, remote
-access, NIC firmware upgrade (with `AqDashAgent` running on the host). This is the workflow shown
-in Lenovo's P620 DASH guide.
+Windows GUI from the same AMD page, shown in Lenovo's P620 DASH guide.
+
+**Directly against the DASH IP only discovery works.** AMC (built on Openwsman) receives the
+firmware's Digest challenge `Digest Nonce="...",Realm="AQC107 DASH",Qop="auth"` and closes the
+connection without ever sending credentials (verified with a packet capture): the capitalised
+parameter names are not recognised. The firmware also advertises only the `https/digest` security
+profile in `Identify`.
+
+Through [`tools/dash-auth-proxy.py`](../tools/dash-auth-proxy.py), which rewrites the challenge
+to `realm=`/`nonce=`/`qop=` and fixes the Boot Control profile id:
+
+| AMC feature | Result |
+|---|---|
+| Discovery, inventory | ✅ |
+| System health (sensors) | ✅ requests succeed, all sensors `Unknown` (firmware) |
+| Event log, indications | ✅ |
+| Text redirection enumerate / connect / disable | ✅ at WS-Man level; the terminal window reports "connection failed" (OS running) |
+| KVM redirection, USB redirection | ❌ "enumeration failed" (`AIMT_KVMCapabilities` missing) |
+| Power state 8 | ❌ "failed" (firmware `ReturnValue 4`) |
+
+Setup: run the proxy on a Linux machine of the management LAN (not on the managed host),
+e.g. `DASH_PROXY_LOG=amc.log tools/dash-auth-proxy.py 192.168.1.60 623 192.168.1.51`, then in AMC
+*Global Configuration → Settings* keep **HTTP 623 only**, add a Digest authentication scheme with
+the DASH credentials, and discover the proxy address.
 
 ### Generic WS-Management tools
 
@@ -91,8 +112,8 @@ in Lenovo's P620 DASH guide.
 - **openwsman `wsman`** (`wsmancli`) — ⚠️ not packaged in Debian 13; may be available on other
   distributions.
 - **Python** — `urllib`'s Digest handler cannot authenticate (the firmware capitalises `Nonce=`,
-  `Realm=`, `Qop=`); `requests` + `HTTPDigestAuth` or shelling out to curl are alternatives
-  (only the latter was tested).
+  `Realm=`, `Qop=`); shelling out to curl works, and so does `urllib` through
+  `tools/dash-auth-proxy.py` (both tested).
 
 ### Endpoints summary
 
@@ -109,6 +130,9 @@ in Lenovo's P620 DASH guide.
   VLAN or filter it on your network equipment; the host firewall does not see this traffic.
 - Port 623 carries Digest authentication in clear-text HTTP. Prefer 664 from untrusted segments,
   or restrict 623 to the management network.
+- The firmware always sends the **same Digest nonce** (`dcd98b7102dd2f0e8b11d0f600bfb0c093`, the
+  RFC 2617 example value), so a captured Digest response can be replayed. Treat 623 as
+  unauthenticated from an attacker's point of view.
 - Use a strong password: accounts are locked after 10 successive login failures
   (`MaximumSuccessiveLoginFailures`).
 - `AqDashConfig` (run as root on the host) can reconfigure DASH at any time, including credentials:

@@ -13,9 +13,10 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 | [`dkms/`](dkms) | DKMS configuration (rebuilds automatically on kernel updates) |
 | [`initramfs/`](initramfs) | initramfs-tools hook — without it the stock `atlantic` from the initramfs wins |
 | [`systemd/`](systemd) | Unit for Marvell's `AqDashAgent` |
-| [`tools/dashws.py`](tools/dashws.py) | Minimal WS-Man client (identify, enumerate, **power on/off/reset**) — python3 + curl |
+| [`tools/dashws.py`](tools/dashws.py) | Minimal WS-Man client (identify, enumerate, **remote power-on**, power state requests) — python3 + curl |
 | [`tools/make-certs.sh`](tools/make-certs.sh) | CA + TLS certificate for the DASH endpoint |
 | [`tools/dash-configure.sh`](tools/dash-configure.sh) | Wrapper around `AqDashConfig` (handles bridged hosts) |
+| [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py) | Proxy fixing the firmware's non-standard Digest challenge — needed by AMD Management Console |
 | [`docs/`](docs) | [Step-by-step guide](docs/guide.md), [**remote management & clients**](docs/remote-management.md), [pitfalls](docs/pitfalls.md), [Proxmox VE notes](docs/proxmox.md), [driver port details](docs/driver-port.md) |
 
 ## Status
@@ -23,9 +24,10 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 Working end to end, including **remote power-on from S5**:
 
 - WS-Man over HTTP (623) and HTTPS (664) with Digest authentication
-- Power management: power-on from S5 validated; off (soft), power cycle and reset are accepted by the firmware but not exercised
+- **Power-on from S5** validated; off and reset are **rejected by the firmware** (`ReturnValue 4`) — shut down / reboot from the OS
 - Inventory: BIOS, NIC/EC firmware, CPU, memory, chassis, BIOS event log, boot sources
-- Text console redirection (SSH/Telnet) and VNC KVM access points are exposed (disabled by default, not tested yet)
+- AMD Management Console 14 works for inventory, health, logs through [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py)
+- Not working: KVM (AMD-specific classes missing), sensor readings (all `Unknown`); text console not validated yet
 
 Tested configuration:
 
@@ -81,6 +83,8 @@ tools/dashws.py -H 192.168.1.51 -u admin -p 'S3cret!' power 2      # power on
 - On Linux, `AqDashConfig` reads the ACPI `ASF!` table and programs the 4 SMBus power-control
   commands. A Windows VM with the NIC passed through does **not** see that table.
 - Test DASH **from another machine**: traffic from the host to its own NIC never reaches the wire.
+- The firmware's Digest challenge is non-standard (`Nonce=`, `Realm=`, `Qop=`) and its nonce is
+  constant: strict clients (AMC, Python urllib) never authenticate without the proxy.
 
 Details, symptoms and fixes: [docs/pitfalls.md](docs/pitfalls.md).
 

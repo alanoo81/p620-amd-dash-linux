@@ -160,8 +160,17 @@ install -m644 systemd/aqdashagent.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now aqdashagent
 ```
 
-The agent relays firmware requests (graceful power operations, OS status) to the host. Exclusive-mode
-DASH itself runs in the NIC firmware.
+The agent relays firmware requests (OS status, host IP) to the host. Exclusive-mode DASH itself
+runs in the NIC firmware.
+
+Like `AqDashConfig`, the agent reads the IPv4 address **of the NIC itself**. On a bridged host it
+logs `Adapter - IP Addr get failed!` every second. Give the NIC the host address as a `/32` without
+route, e.g. in `/etc/network/interfaces`:
+
+```
+iface nic0 inet manual
+	post-up ip addr add 192.168.1.50/32 dev nic0 noprefixroute || true
+```
 
 ## 6. Certificates
 
@@ -231,7 +240,11 @@ tools/dashws.py -H 192.168.1.51 -u admin -p 'S3cret!' power 10    # reset
 request returns a non-zero `ReturnValue` (e.g. 4097).
 
 Validated: clean OS shutdown, then `power 2` from another machine powers the P620 on.
-Prefer a clean shutdown from the OS over `power 8` when the OS is reachable.
+
+**Off (8) and reset (10) are rejected with `ReturnValue 4` while the system is on**, from
+`dashws.py` and from AMD Management Console alike, although they are listed in
+`AvailableRequestedPowerStates`. The firmware refuses on its own: no request reaches the driver or
+`AqDashAgent`. Shut down and reboot from the OS; use DASH to power on.
 
 ## Security notes
 

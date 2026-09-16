@@ -119,14 +119,44 @@ Re-issuing a device certificate with the same CN fails silently in scripts
 (`failed to update database`). Set `unique_subject = no` in `index.txt.attr` (done by
 `tools/make-certs.sh`).
 
+## AMD Management Console: discovery works, everything else fails
+
+AMC 14 logs `Inventory failed`, `KVM Redirection enumeration failed`. A capture shows AMC
+(Openwsman) sending requests without credentials, receiving
+`401 WWW-Authenticate: Digest Nonce="...",Realm="AQC107 DASH",Qop="auth"` and closing the connection
+immediately. The capitalised parameter names are not recognised. Put
+[`tools/dash-auth-proxy.py`](../tools/dash-auth-proxy.py) in between (HTTP only) — details and
+what works in [remote-management.md](remote-management.md#amd-management-console-amc--tested-v14-needs-toolsdash-auth-proxypy).
+
+Other firmware defects found on the way:
+
+- Boot Control profile registered as `CIM:Boot Control:1.0.2` (with a space) instead of
+  `CIM:BootControl:1.0.2`: AMC reports `Boot config enumeration failed` without sending a request.
+  The proxy maps it.
+- WS-Man association filters (`AssociatedInstances`) are ignored.
+- All `CIM_NumericSensor` readings are `0` / `Unknown`.
+- Constant Digest nonce (see [security notes](remote-management.md#security)).
+
+## Power off / reset: `ReturnValue 4`
+
+`power 8` and `power 10` are rejected while the system is on, even though
+`AvailableRequestedPowerStates` lists them. Tracing the agent shows no request coming from the
+firmware: the refusal happens in the NIC firmware (the ACPI `ASF!` remote control table is correct:
+EC at `0xA9`, commands `0x50` off, `0x52` on, `0x51` cycle, `0x53` reset). Power-on from S5 works.
+
+## `AqDashAgent`: `Adapter - IP Addr get failed!` every second
+
+Same cause as for `AqDashConfig`: no IPv4 on the NIC of a bridged host. Add the host IP as a `/32`
+without route on the NIC (see [guide §5](guide.md#5-marvell-tools-and-agent)).
+
 ## Windows VM with the NIC passed through
 
 The documented Lenovo workflow is Windows-only (`AqDashConfig.exe` talks to the Windows driver over
 WMI). It is possible to provision from a Windows VM with the AQC107 passed through (it is alone in
 its IOMMU group), but:
 
-- the VM does not see the host's ACPI `ASF!` table: `Found 0 ASF power control operations`, so remote
-  power control would not be programmed;
+- the VM does not see the host's ACPI `ASF!` table: `Found 0 ASF power control operations`, so the
+  platform power commands are not programmed into the NIC;
 - injecting the host table into the VM (`-acpitable file=ASF.aml`) and starting it with the NIC
   passed through was followed within seconds by a **hard reset of the host** (seen once, cause not
   established — the previous boot of the same VM without the table was fine);

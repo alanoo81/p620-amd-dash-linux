@@ -10,3 +10,5 @@ Module.symvers
 *.key
 dash-certs/
 *.zip
+__pycache__/
+*.pyc
