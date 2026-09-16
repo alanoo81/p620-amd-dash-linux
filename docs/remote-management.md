@@ -1,0 +1,115 @@
+# Managing the machine remotely
+
+Once DASH is configured (exclusive mode, dedicated IP — `192.168.1.51` below), the machine can be
+managed from any host on the management network, **whether the OS is running or the machine is
+powered off** (standby power present).
+
+Legend: ✅ tested on the reference machine · ⚠️ exposed by the firmware, not tested · ❌ not available
+
+## What you can do
+
+| Task | Status | How (with `tools/dashws.py`) |
+|---|---|---|
+| Check that DASH answers | ✅ | `identify` |
+| Power state | ✅ | `enum CIM_AssociatedPowerManagementService` → `PowerState` 2 = on, 8 = off |
+| **Power on** (from S5) | ✅ | `power 2` |
+| Power off (soft) / power cycle / reset | ⚠️ accepted states, not exercised | `power 8` / `power 5` / `power 10` |
+| Hardware inventory | ✅ | `enum CIM_ComputerSystem`, `CIM_Processor`, `CIM_PhysicalMemory`, `CIM_Chassis` |
+| Firmware versions | ✅ | `enum CIM_BIOSElement`, `CIM_SoftwareIdentity` (NIC firmware, EC) |
+| Sensors | ⚠️ listed (voltages, temperatures) but every reading is 0 / Unknown on the test machine | `enum CIM_NumericSensor` |
+| BIOS event log | ✅ | `enum CIM_RecordLog`, `CIM_LogEntry` |
+| Boot sources / boot order | ✅ read | `enum CIM_BootSourceSetting`, `CIM_BootConfigSetting` |
+| One-time boot / boot to BIOS setup | ⚠️ | Boot Control profile (DSP1012, one-time boot only); use DASH CLI or AMC |
+| Text console (BIOS setup over SSH/Telnet) | ⚠️ disabled by default | `CIM_TextRedirectionService` + SSH (22) / Telnet (23) endpoints on the DASH IP |
+| KVM (VNC) | ⚠️ disabled by default | `CIM_KVMRedirectionSAP`, `KVMProtocol = 4` |
+| DASH accounts | ✅ read | `enum CIM_Account` (lockout after 10 failed logins) |
+| Firmware update over DASH | ⚠️ | Software Update profile, NIC firmware only (AMC / DASH CLI + `AqDashAgent`) |
+| Serial-over-LAN / IPMI | ❌ | not IPMI: DASH is WS-Management only |
+
+Example session:
+
+```sh
+export DASH_HOST=192.168.1.51 DASH_USER=admin DASH_PASSWORD='S3cret!'
+
+tools/dashws.py identify
+tools/dashws.py enum CIM_AssociatedPowerManagementService | grep PowerState
+tools/dashws.py power 2                                   # power on
+tools/dashws.py --https --cacert DASHCA.crt enum CIM_SoftwareIdentity
+```
+
+## Recommended practices
+
+- **Shut down from the OS** when it is reachable (`ssh host poweroff`), and keep DASH for
+  power-on and for when the OS is unreachable. `power 8` goes through the platform power controls
+  (ASF commands to the EC) and may not be a clean OS shutdown.
+- **Wake-on-LAN stays a fallback** (`wakeonlan <host MAC>`), independent of the DASH configuration.
+- Check `AvailableRequestedPowerStates` before scripting a transition: the firmware only accepts
+  states valid from the current one (e.g. `5, 8, 10` when on).
+- A request that is refused returns a non-zero `ReturnValue` (e.g. `4097`); `dashws.py` exits with
+  status 1 in that case, so it can be used in scripts.
+
+## Clients
+
+### `tools/dashws.py` (this repository) — ✅ tested
+
+- Linux, macOS, WSL; needs `python3` and `curl`.
+- HTTP (623) or HTTPS (664, `--https --cacert DASHCA.crt`; enables the legacy TLS renegotiation the
+  firmware requires, for its own requests only).
+- Commands: `identify`, `enum <CIM class or resource URI>` (with pull), `power <state>`.
+- Credentials from options, environment (`DASH_HOST`, `DASH_USER`, `DASH_PASSWORD`) or a
+  `--creds` file (`user=` / `password=` lines).
+
+### AMD DASH CLI (`dashcli`) — ⚠️ not tested here
+
+AMD's command-line client, used in Lenovo's documentation, with the most complete coverage
+(power, boot control, text/KVM redirection, users, software update). Windows installer and Linux
+builds from AMD's [Tools for DMTF DASH](https://developer.amd.com/tools-for-dmtf-dash/) page; an
+older open-source DASH SDK (with `dashcli` sources) is mirrored at
+[juergh/dash-sdk](https://github.com/juergh/dash-sdk).
+
+Examples from the Lenovo guide (adapt host and credentials):
+
+```sh
+dashcli -h 192.168.1.51 -p 664 -S https -a digest -u admin -P 'S3cret!' -t computersystem[0] power status
+dashcli -h 192.168.1.51 -p 623 -S http  -a digest -u admin -P 'S3cret!' -t computersystem[0] power on
+dashcli -h 192.168.1.51 -p 623 -a digest -u admin -P 'S3cret!' discover
+```
+
+For HTTPS without `-C` (ignore certificate), import `DASHCA.crt` into the console's trust store.
+The TLS legacy-renegotiation requirement may affect Linux builds linked against OpenSSL 3.
+
+### AMD Management Console (AMC) — ⚠️ not tested here
+
+Windows GUI from the same AMD page: discovery, inventory, health, power, boot to BIOS, remote
+access, NIC firmware upgrade (with `AqDashAgent` running on the host). This is the workflow shown
+in Lenovo's P620 DASH guide.
+
+### Generic WS-Management tools
+
+- **curl + SOAP envelopes** — ✅ works (that is what `dashws.py` does). Use `--digest`; complete
+  envelopes with `wsman:MaxEnvelopeSize`, `OperationTimeout` and `mustUnderstand` headers.
+- **openwsman `wsman`** (`wsmancli`) — ⚠️ not packaged in Debian 13; may be available on other
+  distributions.
+- **Python** — `urllib`'s Digest handler cannot authenticate (the firmware capitalises `Nonce=`,
+  `Realm=`, `Qop=`); `requests` + `HTTPDigestAuth` or shelling out to curl are alternatives
+  (only the latter was tested).
+
+### Endpoints summary
+
+| Port | Protocol | Notes |
+|---|---|---|
+| 623/tcp | WS-Man over HTTP | Digest auth, realm `AQC107 DASH` |
+| 664/tcp | WS-Man over HTTPS | TLS 1.2, legacy renegotiation required, certificate loaded with `AqDashConfig` |
+| 22/tcp, 23/tcp | SSH / Telnet text console | endpoints defined, service disabled by default (filtered) |
+| 5900/tcp | VNC KVM | access point defined, disabled by default |
+
+## Security
+
+- The DASH IP is a full management interface (power, boot, console). Put it on a management
+  VLAN or filter it on your network equipment; the host firewall does not see this traffic.
+- Port 623 carries Digest authentication in clear-text HTTP. Prefer 664 from untrusted segments,
+  or restrict 623 to the management network.
+- Use a strong password: accounts are locked after 10 successive login failures
+  (`MaximumSuccessiveLoginFailures`).
+- `AqDashConfig` (run as root on the host) can reconfigure DASH at any time, including credentials:
+  host root compromise means DASH compromise.

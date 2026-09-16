@@ -16,7 +16,7 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 | [`tools/dashws.py`](tools/dashws.py) | Minimal WS-Man client (identify, enumerate, **power on/off/reset**) — python3 + curl |
 | [`tools/make-certs.sh`](tools/make-certs.sh) | CA + TLS certificate for the DASH endpoint |
 | [`tools/dash-configure.sh`](tools/dash-configure.sh) | Wrapper around `AqDashConfig` (handles bridged hosts) |
-| [`docs/`](docs) | [Step-by-step guide](docs/guide.md), [pitfalls](docs/pitfalls.md), [Proxmox VE notes](docs/proxmox.md), [driver port details](docs/driver-port.md) |
+| [`docs/`](docs) | [Step-by-step guide](docs/guide.md), [**remote management & clients**](docs/remote-management.md), [pitfalls](docs/pitfalls.md), [Proxmox VE notes](docs/proxmox.md), [driver port details](docs/driver-port.md) |
 
 ## Status
 
@@ -24,7 +24,7 @@ Working end to end, including **remote power-on from S5**:
 
 - WS-Man over HTTP (623) and HTTPS (664) with Digest authentication
 - Power management (on, off soft, power cycle, reset)
-- Inventory: BIOS, NIC firmware, EC firmware, CPU/memory, sensors, boot configuration
+- Inventory: BIOS, NIC/EC firmware, CPU, memory, chassis, BIOS event log, boot sources
 - Text console redirection (SSH/Telnet) and VNC KVM access points are exposed (disabled by default, not tested yet)
 
 Tested configuration:
@@ -66,7 +66,7 @@ genl ctrl get name aq-dash
 tools/make-certs.sh ./dash-certs myhost 192.168.1.51
 sudo tools/dash-configure.sh exclusive nic0 admin 'S3cret!' dash-certs/cert.pem dash-certs/key.pem 192.168.1.51 02:00:00:00:00:51
 
-# 5. From another machine
+# 5. From another machine (all clients and tasks: docs/remote-management.md)
 tools/dashws.py -H 192.168.1.51 --https --cacert dash-certs/DASHCA.crt -u admin -p 'S3cret!' identify
 tools/dashws.py -H 192.168.1.51 -u admin -p 'S3cret!' power 2      # power on
 ```
