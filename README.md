@@ -16,7 +16,7 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 | [`tools/dashws.py`](tools/dashws.py) | Minimal WS-Man client (identify, enumerate, **remote power-on**, power state requests) — python3 + curl |
 | [`tools/make-certs.sh`](tools/make-certs.sh) | CA + TLS certificate for the DASH endpoint |
 | [`tools/dash-configure.sh`](tools/dash-configure.sh) | Wrapper around `AqDashConfig` (handles bridged hosts) |
-| [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py) | Proxy fixing the firmware's non-standard Digest challenge — needed by AMD Management Console |
+| [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py) | Proxy fixing the firmware's non-standard Digest challenge — needed by AMD Management Console and AMD DASH CLI |
 | [`docs/`](docs) | [Step-by-step guide](docs/guide.md), [**remote management & clients**](docs/remote-management.md), [pitfalls](docs/pitfalls.md), [Proxmox VE notes](docs/proxmox.md), [driver port details](docs/driver-port.md) |
 
 ## Status
@@ -26,7 +26,7 @@ Working end to end, including **remote power-on from S5**:
 - WS-Man over HTTP (623) and HTTPS (664) with Digest authentication
 - **Power-on from S5** validated; off and reset are **rejected by the firmware** (`ReturnValue 4`) — shut down / reboot from the OS
 - Inventory: BIOS, NIC/EC firmware, CPU, memory, chassis, BIOS event log, boot sources
-- AMD Management Console 14 works for inventory, health, logs through [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py)
+- AMD Management Console 14 and AMD DASH CLI 9.0 work (inventory, power status/on, logs…) only through [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py)
 - Not working: KVM (AMD-specific classes missing), sensor readings (all `Unknown`); text console not validated yet
 
 Tested configuration:
@@ -84,7 +84,8 @@ tools/dashws.py -H 192.168.1.51 -u admin -p 'S3cret!' power 2      # power on
   commands. A Windows VM with the NIC passed through does **not** see that table.
 - Test DASH **from another machine**: traffic from the host to its own NIC never reaches the wire.
 - The firmware's Digest challenge is non-standard (`Nonce=`, `Realm=`, `Qop=`) and its nonce is
-  constant: strict clients (AMC, Python urllib) never authenticate without the proxy.
+  constant: strict clients (AMD Management Console, AMD DASH CLI, Python urllib) never authenticate
+  without the proxy.
 
 Details, symptoms and fixes: [docs/pitfalls.md](docs/pitfalls.md).
 

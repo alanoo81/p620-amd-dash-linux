@@ -119,9 +119,10 @@ Re-issuing a device certificate with the same CN fails silently in scripts
 (`failed to update database`). Set `unique_subject = no` in `index.txt.attr` (done by
 `tools/make-certs.sh`).
 
-## AMD Management Console: discovery works, everything else fails
+## AMD Management Console / DASH CLI: discovery works (or not), everything else fails
 
-AMC 14 logs `Inventory failed`, `KVM Redirection enumeration failed`. A capture shows AMC
+AMC 14 logs `Inventory failed`, `KVM Redirection enumeration failed`; AMD DASH CLI 9.0 reports
+"No system was identified as DASH capable" / "Unknown Error". A capture shows AMC
 (Openwsman) sending requests without credentials, receiving
 `401 WWW-Authenticate: Digest Nonce="...",Realm="AQC107 DASH",Qop="auth"` and closing the connection
 immediately. The capitalised parameter names are not recognised. Put
@@ -142,7 +143,8 @@ Other firmware defects found on the way:
 `power 8` and `power 10` are rejected while the system is on, even though
 `AvailableRequestedPowerStates` lists them. Tracing the agent shows no request coming from the
 firmware: the refusal happens in the NIC firmware (the ACPI `ASF!` remote control table is correct:
-EC at `0xA9`, commands `0x50` off, `0x52` on, `0x51` cycle, `0x53` reset). Power-on from S5 works.
+EC at `0xA9`, commands `0x50` off, `0x52` on, `0x51` cycle, `0x53` reset). AMD DASH CLI 9.0 sends
+the same `RequestPowerStateChange` and gets the same answer. Power-on from S5 works.
 
 ## `AqDashAgent`: `Adapter - IP Addr get failed!` every second
 

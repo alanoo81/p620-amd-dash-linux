@@ -16,7 +16,7 @@ usage: dash-auth-proxy.py <listen-ip> <listen-port> <dash-ip> [<dash-port>]
 
 Run it on a machine that reaches the DASH IP through the wire, NOT on the managed host itself
 (the host cannot talk to its own NIC firmware). Point the client at <listen-ip>, HTTP only.
-Tested with AMD Management Console 14: inventory, health, event log, indications and text
+Tested with AMD Management Console 14 and AMD DASH CLI 9.0: inventory, health, event log, indications, text
 redirection enumeration/connect work through it.
 """
 import re, socket, sys, threading, time, os

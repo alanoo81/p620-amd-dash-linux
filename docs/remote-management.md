@@ -13,7 +13,7 @@ Legend: ✅ tested on the reference machine · ⚠️ exposed by the firmware, n
 | Check that DASH answers | ✅ | `identify` |
 | Power state | ✅ | `enum CIM_AssociatedPowerManagementService` → `PowerState` 2 = on, 8 = off |
 | **Power on** (from S5) | ✅ | `power 2` |
-| Power off (soft) / reset | ❌ **rejected by the firmware** (`ReturnValue 4`) while the system is on, although listed in `AvailableRequestedPowerStates` | `power 8` / `power 10` |
+| Power off (soft) / reset | ❌ **rejected by the firmware** (`ReturnValue 4`) while the system is on, although listed in `AvailableRequestedPowerStates` — same result with AMD Management Console and AMD DASH CLI | `power 8` / `power 10` |
 | Power cycle | ⚠️ not tested (most likely rejected like 8 and 10) | `power 5` |
 | Hardware inventory | ✅ | `enum CIM_ComputerSystem`, `CIM_Processor`, `CIM_PhysicalMemory`, `CIM_Chassis` |
 | Firmware versions | ✅ | `enum CIM_BIOSElement`, `CIM_SoftwareIdentity` (NIC firmware, EC) |
@@ -21,7 +21,7 @@ Legend: ✅ tested on the reference machine · ⚠️ exposed by the firmware, n
 | BIOS event log | ✅ | `enum CIM_RecordLog`, `CIM_LogEntry` |
 | Boot sources / boot order | ✅ read | `enum CIM_BootSourceSetting`, `CIM_BootConfigSetting` |
 | One-time boot / boot to BIOS setup | ⚠️ | Boot Control profile (DSP1012, one-time boot only); use DASH CLI or AMC |
-| Text console (BIOS setup over SSH/Telnet) | ⚠️ service and access points can be enabled (`RequestStateChange` → 0); ports 22/23 answer a SYN but no session opens while the OS runs; not tested during POST | `CIM_TextRedirectionService`, `CIM_TextRedirectionSAP`, SSH (22) / Telnet (23) on the DASH IP |
+| Text console (BIOS setup over SSH/Telnet) | ⚠️ service and access points can be enabled (`RequestStateChange` → 0); ports 22/23 answer a SYN but no session opens while the OS runs; not tested during POST | `CIM_TextRedirectionService`, `CIM_TextRedirectionSAP` (`txtsession0` Telnet 23, `txtsession1` SSH 22) |
 | KVM (VNC) | ❌ access point listed, but `CIM_KVMRedirectionService` settings are empty and AMC requires the AMD-specific `AIMT_KVMCapabilities`, which this firmware does not implement | `CIM_KVMRedirectionSAP` |
 | DASH accounts | ✅ read | `enum CIM_Account` (lockout after 10 failed logins) |
 | Firmware update over DASH | ⚠️ | Software Update profile, NIC firmware only (AMC / DASH CLI + `AqDashAgent`) |
@@ -59,24 +59,34 @@ tools/dashws.py --https --cacert DASHCA.crt enum CIM_SoftwareIdentity
 - Credentials from options, environment (`DASH_HOST`, `DASH_USER`, `DASH_PASSWORD`) or a
   `--creds` file (`user=` / `password=` lines).
 
-### AMD DASH CLI (`dashcli`) — ⚠️ not tested here
+### AMD DASH CLI (`dashcli`) — tested (v9.0, Windows), needs `tools/dash-auth-proxy.py`
 
-AMD's command-line client, used in Lenovo's documentation, with the most complete coverage
-(power, boot control, text/KVM redirection, users, software update). Windows installer and Linux
-builds from AMD's [Tools for DMTF DASH](https://developer.amd.com/tools-for-dmtf-dash/) page; an
-older open-source DASH SDK (with `dashcli` sources) is mirrored at
-[juergh/dash-sdk](https://github.com/juergh/dash-sdk).
+AMD's command-line client, from AMD's
+[manageability tools](https://www.amd.com/en/support/downloads/manageability-tools.html) page (an
+older open-source DASH SDK with `dashcli` sources is mirrored at
+[juergh/dash-sdk](https://github.com/juergh/dash-sdk)).
 
-Examples from the Lenovo guide (adapt host and credentials):
+**Directly against the DASH IP it fails** like AMC: `discover` → "No system was identified as DASH
+capable", other commands → "Unknown Error". The `-v 2` trace shows the 401 with the non-standard
+Digest challenge, then retries. **Through the proxy** it works:
 
-```sh
-dashcli -h 192.168.1.51 -p 664 -S https -a digest -u admin -P 'S3cret!' -t computersystem[0] power status
-dashcli -h 192.168.1.51 -p 623 -S http  -a digest -u admin -P 'S3cret!' -t computersystem[0] power on
-dashcli -h 192.168.1.51 -p 623 -a digest -u admin -P 'S3cret!' discover
+| Command (through the proxy) | Result |
+|---|---|
+| `discover` | ✅ |
+| `-t computersystem[0] power status` | ✅ `Power state : On` |
+| `enumerate bootconfig` | ✅ boot devices listed |
+| `enumerate textredirection` | ✅ `txtsession0` = Telnet 23, `txtsession1` = SSH 22, "Enabled but Offline" |
+| `-t computersystem[0] power reset` | ❌ "Power Operation failed" — same request as `dashws.py power 10`, firmware `ReturnValue 4` |
+
+```bat
+set D=-h 192.168.1.60 -p 623 -S http -a digest -u admin -P S3cret!
+dashcli %D% discover
+dashcli %D% -t computersystem[0] power status
+dashcli %D% -t computersystem[0] power on
+dashcli %D% enumerate textredirection
 ```
 
-For HTTPS without `-C` (ignore certificate), import `DASHCA.crt` into the console's trust store.
-The TLS legacy-renegotiation requirement may affect Linux builds linked against OpenSSL 3.
+`-v 2 -o trace.txt` dumps the WS-Man exchanges.
 
 ### AMD Management Console (AMC) — tested (v14), needs `tools/dash-auth-proxy.py`
 
