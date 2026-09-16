@@ -1,9 +1,39 @@
 # AMD DASH on the Lenovo ThinkStation P620 — Linux / kernel 7.0
 
 Out-of-band management (DMTF DASH) for the **Lenovo ThinkStation P620**, configured and used
-**entirely from Linux** — no Windows, no AMD Management Console — tested on a headless Proxmox VE host.
+**entirely from Linux** — tested on a headless Proxmox VE host.
 
-DASH on the P620 is implemented by the firmware of the **onboard Marvell (Aquantia) AQC107 10 GbE NIC**.
+## Read this first: DASH on the P620 is of limited use
+
+DASH on the P620 is not a BMC. It is a feature of the firmware of the **onboard Marvell (Aquantia)
+AQC107 NIC**, and that firmware implements very little of what DASH promises. After getting it fully
+working from Linux and testing it with three clients (this repository's `dashws.py`, AMD Management
+Console 14, AMD DASH CLI 9.0), this is what you actually get:
+
+| Feature | Result |
+|---|---|
+| **Remote power-on** of a machine that is off (S5) | ✅ works — the one genuinely useful feature |
+| Power state, hardware/firmware inventory, BIOS event log, boot device list | ✅ read-only |
+| **Power off / reset** while running | ❌ **rejected by the NIC firmware** (`ReturnValue 4`), with every client (power cycle not tested, presumably the same) |
+| Remote console, BIOS setup access (KVM) | ❌ not implemented (AMC/DASH CLI expect AMD-specific classes) |
+| Text console redirection (SSH/Telnet) | ⚠️ can be enabled, no session while the OS runs; unproven during POST |
+| Health sensors (temperatures, voltages, fans) | ❌ listed but every reading is `0` / `Unknown` |
+| AMD Management Console / AMD DASH CLI | ⚠️ both **fail to authenticate** against the firmware (non-standard Digest challenge); usable only through [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py) |
+| Security | ⚠️ constant Digest nonce (replayable), legacy TLS renegotiation required on 664 |
+
+**In practice this is an authenticated Wake-on-LAN plus a read-only inventory.** It cannot shut down,
+reset or recover a hung machine, and gives no console. If you only need to power the machine on
+remotely, **Wake-on-LAN** already does that with none of the effort below (firmware flash, patched
+kernel driver, DKMS, initramfs hook, certificates, proxy). If you need real out-of-band control
+(hard reset, console, BIOS access), use a network-controlled power switch/PDU plus an IP KVM
+(e.g. a PiKVM-style device) instead.
+
+This repository remains useful as documentation of the P620/AQC107 DASH implementation, as a working
+reference for the `aq-dash` driver port on current kernels, and if authenticated power-on over
+WS-Management matters to you.
+
+## What is in this repository
+
 Lenovo only documents a Windows workflow, and the Linux tools shipped by Marvell need a
 DASH-enabled `atlantic` driver that no longer builds on current kernels. This repository provides:
 
@@ -19,17 +49,10 @@ DASH-enabled `atlantic` driver that no longer builds on current kernels. This re
 | [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py) | Proxy fixing the firmware's non-standard Digest challenge — needed by AMD Management Console and AMD DASH CLI |
 | [`docs/`](docs) | [Step-by-step guide](docs/guide.md), [**remote management & clients**](docs/remote-management.md), [pitfalls](docs/pitfalls.md), [Proxmox VE notes](docs/proxmox.md), [driver port details](docs/driver-port.md) |
 
-## Status
+## Tested configuration
 
-Working end to end, including **remote power-on from S5**:
-
-- WS-Man over HTTP (623) and HTTPS (664) with Digest authentication
-- **Power-on from S5** validated; off and reset are **rejected by the firmware** (`ReturnValue 4`) — shut down / reboot from the OS
-- Inventory: BIOS, NIC/EC firmware, CPU, memory, chassis, BIOS event log, boot sources
-- AMD Management Console 14 and AMD DASH CLI 9.0 work (inventory, power status/on, logs…) only through [`tools/dash-auth-proxy.py`](tools/dash-auth-proxy.py)
-- Not working: KVM (AMD-specific classes missing), sensor readings (all `Unknown`); text console not validated yet
-
-Tested configuration:
+WS-Man over HTTP (623) and HTTPS (664) with Digest authentication, remote power-on from S5 validated;
+full feature matrix per client in [docs/remote-management.md](docs/remote-management.md).
 
 | Component | Version |
 |---|---|
